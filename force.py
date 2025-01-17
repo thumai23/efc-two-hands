@@ -226,9 +226,6 @@ def main():
 
                 pass
 
-        np.save(os.path.join(gl.baseDir, args.experiment, f'{gl.glmDir}{args.glm}', f'subj{args.sn}',
-                             f'ROI.{args.Hem}.{args.roi}.beta.npy'), contrasts)
-
     else:
         parser.print_help()
 

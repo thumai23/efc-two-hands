@@ -183,7 +183,7 @@ def calc_single_trial_metrics(experiment=None, sn=None, day=None, blocks=None):
                 MD = -1
                 force_avg = force_tmp[-int(gl.hold_time * gl.fsample):].mean(axis=0)
 
-            if dat_tmp.iloc[ntrial]['chordID'].astype(str) in trained:
+            if dat_tmp.iloc[ntrial]['chordID'].astype(int).astype(str) in trained:
                 chord = 'trained'
             else:
                 chord = 'untrained'

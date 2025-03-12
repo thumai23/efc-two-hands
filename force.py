@@ -1,15 +1,73 @@
 import argparse
-
-from sklearn.preprocessing import MinMaxScaler
-import pandas as pd
+import os
+import time
+import warnings
 
 import numpy as np
-
-import warnings
+import pandas as pd
+from scipy.signal import filtfilt, firwin
 
 import globals as gl
 
-import os
+
+def lowpass_fir(data, n_ord=None, cutoff=None, fsample=None, padlen=None, axis=-1):
+    """
+    Low-pass filter to remove high-frequency noise from the EMG signal.
+
+    :param data: Input signal to be filtered.
+    :param n_ord: Filter order.
+    :param cutoff: Cutoff frequency of the low-pass filter.
+    :param fsample: Sampling frequency of the input signal.
+    :return: Filtered signal.
+    """
+    numtaps = int(n_ord * fsample / cutoff)
+    b = firwin(numtaps + 1, cutoff, fs=fsample, pass_zero='lowpass')
+    filtered_data = filtfilt(b, 1, data, axis=axis, padlen=padlen)
+
+    return filtered_data
+
+
+def calc_md(X):
+    N, m = X.shape
+    F1 = X[0]
+    FN = X[-1] - F1  # Shift the end point
+
+    shifted_matrix = X - F1  # Shift all points
+
+    d = list()
+
+    for t in range(1, N - 1):
+        Ft = shifted_matrix[t]
+
+        # Project Ft onto the ideal straight line
+        proj = np.dot(Ft, FN) / np.dot(FN, FN) * FN
+
+        # Calculate the Euclidean distance
+        d.append(np.linalg.norm(Ft - proj))
+
+    d = np.array(d)
+    MD = d.mean()
+
+    return MD, d
+
+
+def calc_rt(X, threshold=gl.fthresh):
+    """
+    Finds the first sample (row index) where any column in the matrix exceeds the given threshold.
+
+    Parameters:
+    matrix (np.ndarray): A 2D numpy array where columns are vertical vectors.
+    threshold (float): The threshold value to check against.
+
+    Returns:
+    int: The first row index where any column exceeds the threshold, or -1 if no value exceeds.
+    """
+
+    exceed_mask = np.any(X > threshold, axis=1)
+    exceeding_indices = np.where(exceed_mask)[0]
+
+    return int(exceeding_indices[0]) if exceeding_indices.size > 0 else -1
+
 
 def load_mov(filename):
     """
@@ -51,184 +109,140 @@ def load_mov(filename):
     return mov
 
 
-def calc_md(X):
-    N, m = X.shape
-    F1 = X[0]
-    FN = X[-1] - F1  # Shift the end point
+def calc_single_trial_metrics(experiment=None, sn=None, day=None, blocks=None):
+    ch_idx = np.array(gl.diffCols)
 
-    shifted_matrix = X - F1  # Shift all points
-
-    d = list()
-
-    for t in range(1, N - 1):
-        Ft = shifted_matrix[t]
-
-        # Project Ft onto the ideal straight line
-        proj = np.dot(Ft, FN) / np.dot(FN, FN) * FN
-
-        # Calculate the Euclidean distance
-        d.append(np.linalg.norm(Ft - proj))
-
-    d = np.array(d)
-    MD = d.mean()
-
-    return MD, d
-
-
-def get_segment(x, hold_time=gl.hold_time):
-    c = np.any(np.abs(x) > gl.fthresh, axis=1)
-
-    start_samp_exec = np.argmax(c)
-
-    if hold_time is None:
-        starttime = start_samp_exec / gl.fsample
-        d = np.all(np.abs(x) > gl.ftarget, axis=1)
-        end_samp_exec = np.argmax(d) if np.any(d) else None
-        endtime = end_samp_exec / gl.fsample if end_samp_exec is not None else None
-        x_s = x[start_samp_exec:end_samp_exec]
-    else:
-        x_s = x[start_samp_exec:-int(hold_time * gl.fsample)]
-        starttime = start_samp_exec / gl.fsample
-        execTime = ((len(x) - int(hold_time * gl.fsample)) / gl.fsample) - starttime
-
-    # assert execTime > 0
-    # assert starttime > 0
-
-    return x_s, starttime, execTime
-
-def calc_single_trial(day=None, sn=None):
-
-    behavioural_dict = {
-        'BN': [],
-        'TN': [],
-        'participant_id': [],
-        'subNum': [],
-        'chordID': [],
-        'chord': [],
-        'hand': [],
-        'trialPoint': [],
-        'repetition': [],
-        'day': [],
-        'MD': [],
-        'RT': [],
-        'ET': [],
-        'thumb_force': [],
-        'index_force': [],
-        'middle_force': [],
-        'ring_force': [],
-        'pinkie_force': [],
-    }
-
-    path = os.path.join(gl.baseDir, gl.dataDir, f"efc_2hands_day0{day}")
+    dat = pd.read_csv(os.path.join(gl.baseDir, f'day{day}', f'{experiment}_{sn}.dat'),
+                      sep='\t')
 
     pinfo = pd.read_csv(os.path.join(gl.baseDir, 'participants.tsv'), sep='\t')
-    blocks = ['1', '2', '3', '4', '5', '6', '7', '8']
+    trained = pinfo[pinfo['subNum'] == sn].trained_chords.reset_index(drop=True)[0].split('.')
 
-    dat = pd.read_csv(os.path.join(path, f"efc_2hands_{sn}.dat"), sep="\t")
+    single_trial_metrics = {
+        'subNum': [],
+        'BN': [],
+        'TN': [],
+        'day': [],
+        'hand': [],
+        'thumb': [],
+        'index': [],
+        'middle': [],
+        'ring': [],
+        'pinkie': [],
+        'thumb_der': [],
+        'index_der': [],
+        'middle_der': [],
+        'ring_der': [],
+        'pinkie_der': [],
+        'trialPoint': [],
+        'RT': [],
+        'ET': [],
+        'MD': [],
+        # 'MD_c++': [],
+        'chordID': [],
+        'chord': []
 
-    # nblocks = len(pinfo[pinfo['participant_id'] == p][f'blocks Chords day{day}'][0].split(','))
+    }
+    for bl in blocks:
 
-    for block in blocks:
+        dat_tmp = dat[dat['BN'] == int(bl)]
 
-        block = int(block)
-
-        print(f"participant_id:subj{sn}, "
-              f"day:{day}, "
-              f"block:{block}")
-
-        filename = os.path.join(path, f'efc_2hands_{sn}_{block:02d}.mov')
+        filename = os.path.join(gl.baseDir, f'day{day}', f'{experiment}_{sn}_{int(bl):02d}.mov')
 
         mov = load_mov(filename)
 
-        dat_tmp = dat[dat.BN == block].reset_index()  # .dat file for block
+        for ntrial, mov_tmp in enumerate(mov):
 
-        for tr in range(len(mov)):
+            print(f'Processing... subj{sn},  day {day}, block {bl}, trial {ntrial + 1}, hand {dat_tmp.iloc[ntrial].hand}, {len(mov)} trials found...')
 
-            if tr == 0 or dat_tmp.iloc[tr].chordID != dat_tmp.iloc[tr - 1].chordID:
-                rep = 1
+            force_tmp = mov_tmp[mov_tmp[:, 0] == gl.wait_exec][:, ch_idx]
+
+            # flip if left hand
+            if dat_tmp.iloc[ntrial].hand == '1':
+                force_tmp = np.flip(force_tmp, axis=1)
+
+            # add gain
+            force_tmp = force_tmp * gl.fGain
+
+            force_filt = lowpass_fir(force_tmp, n_ord=4, cutoff=10, fsample=gl.fsample, padlen=300, axis=0)
+            force_der1 = np.gradient(force_filt, 1 / gl.fsample, axis=0)
+
+            force_der1_avg = np.abs(force_der1.mean(axis=0))
+
+            if dat_tmp.iloc[ntrial].trialPoint == 1:
+                rt_samples = calc_rt(np.abs(force_tmp))
+                et_samples = int(force_tmp.shape[0] - gl.hold_time * gl.fsample)
+
+                assert et_samples >= rt_samples
+
+                MD, _ = calc_md(force_tmp[rt_samples:et_samples])
+                force_avg = force_tmp[-et_samples:].mean(axis=0)
             else:
-                rep += 1
+                rt_samples = -1
+                et_samples = -1
+                MD = -1
+                force_avg = force_tmp[-int(gl.hold_time * gl.fsample):].mean(axis=0)
 
-            chordID = dat_tmp.iloc[tr].chordID.astype(int).astype(str)
-            chord = 'trained' if chordID in pinfo[pinfo['subNum'] == sn]['trained'][0].split('.') else 'untrained'
-
-            # add trial info to dictionary
-            behavioural_dict['BN'].append(dat_tmp.iloc[tr].BN)
-            behavioural_dict['TN'].append(dat_tmp.iloc[tr].TN)
-            behavioural_dict['subNum'].append(sn)
-            behavioural_dict['participant_id'].append(f'subj{sn}')
-            behavioural_dict['chordID'].append(chordID)
-            behavioural_dict['trialPoint'].append(dat_tmp.iloc[tr].trialPoint)
-            behavioural_dict['chord'].append(chord)
-            behavioural_dict['day'].append(day)
-            behavioural_dict['repetition'].append(rep)
-
-            if dat_tmp.iloc[tr].trialPoint == 1:
-
-                forceRaw = mov[tr][:, gl.diffCols][mov[tr][:, 0] == 3] * gl.fGain  # take only states 3 (i.e., WAIT_EXEC)
-
-                # calc single trial metrics
-                force, rt, et = get_segment(forceRaw, hold_time=gl.hold_time)
-
-                # force_avg = force.mean(axis=0)
-                md, _ = calc_md(force)
-
-                assert rt > 0, "negative reaction time"
-                assert et > 0, "negative execution time"
-                assert md > 0, "negative mean deviation"
-
-                # add measures to dictionary
-                behavioural_dict['RT'].append(rt)
-                behavioural_dict['ET'].append(et)
-                behavioural_dict['MD'].append(md)
-                # behavioural_dict['thumb_force'].append(force_avg[0])
-                # behavioural_dict['index_force'].append(force_avg[1])
-                # behavioural_dict['middle_force'].append(force_avg[2])
-                # behavioural_dict['ring_force'].append(force_avg[3])
-                # behavioural_dict['pinkie_force'].append(force_avg[4])
-
+            if dat_tmp.iloc[ntrial]['chordID'].astype(str) in trained:
+                chord = 'trained'
             else:
+                chord = 'untrained'
 
-                # add to dictionary
-                behavioural_dict['RT'].append(None)
-                behavioural_dict['ET'].append(None)
-                behavioural_dict['MD'].append(None)
-                # behavioural_dict['thumb_force'].append(None)
-                # behavioural_dict['index_force'].append(None)
-                # behavioural_dict['middle_force'].append(None)
-                # behavioural_dict['ring_force'].append(None)
-                # behavioural_dict['pinkie_force'].append(None)
+            single_trial_metrics['subNum'].append(dat_tmp.iloc[ntrial]['subNum'])
+            single_trial_metrics['chordID'].append(dat_tmp.iloc[ntrial]['chordID'])
+            single_trial_metrics['chord'].append(chord)
+            single_trial_metrics['day'].append(dat_tmp.iloc[ntrial]['day'])
+            single_trial_metrics['hand'].append(dat_tmp.iloc[ntrial]['hand'])
+            single_trial_metrics['thumb'].append(force_avg[0])
+            single_trial_metrics['index'].append(force_avg[1])
+            single_trial_metrics['middle'].append(force_avg[2])
+            single_trial_metrics['ring'].append(force_avg[3])
+            single_trial_metrics['pinkie'].append(force_avg[4])
+            single_trial_metrics['thumb_der'].append(force_der1_avg[0])
+            single_trial_metrics['index_der'].append(force_der1_avg[1])
+            single_trial_metrics['middle_der'].append(force_der1_avg[2])
+            single_trial_metrics['ring_der'].append(force_der1_avg[3])
+            single_trial_metrics['pinkie_der'].append(force_der1_avg[4])
+            single_trial_metrics['RT'].append(rt_samples / gl.fsample)
+            single_trial_metrics['ET'].append((et_samples - rt_samples) / gl.fsample)
+            single_trial_metrics['MD'].append(MD)
+            # single_trial_metrics['MD_c++'].append(dat_tmp.iloc[ntrial]['MD'])
+            single_trial_metrics['BN'].append(dat_tmp.iloc[ntrial]['BN'])
+            single_trial_metrics['TN'].append(dat_tmp.iloc[ntrial]['TN'])
+            single_trial_metrics['trialPoint'].append(dat_tmp.iloc[ntrial]['trialPoint'])
 
-    behav = pd.DataFrame(behavioural_dict)
+    single_trial_metrics = pd.DataFrame(single_trial_metrics)
 
-    return behav
+    return single_trial_metrics
+
 
 def main():
-
     parser = argparse.ArgumentParser()
 
     parser.add_argument('what', nargs='?', default=None)
-    # parser.add_argument('--day', type=int, default=None)
-    # parser.add_argument('--sn', type=int, default=None)
+    parser.add_argument('--experiment', type=str, default='efc_2hands')
+    # parser.add_argument('--session', type=str, default=None)
+    parser.add_argument('--sn', type=int, default=None)
+    parser.add_argument('--day', type=int, default=None)
+    parser.add_argument('--days', nargs='+', default=[1, 2, 3, 4, 5])
+    parser.add_argument('--blocks', type=int, default=[1, 2, 3, 4, 5, 6, 7, 8])
 
     args = parser.parse_args()
 
     if args.what == 'single_trial':
+        for day in args.days:
+            if day == 1:
+                single_trial_metrics = calc_single_trial_metrics(args.experiment, args.sn, day, args.blocks)
+            else:
+                single_trial_metrics = pd.concat([
+                    single_trial_metrics,
+                    calc_single_trial_metrics(args.experiment, args.sn, day, args.blocks)
+                ])
+        single_trial_metrics.to_csv(
+            os.path.join(gl.baseDir, f'subj{args.sn}_single_trial.tsv'), sep='\t', index=False)
 
-        pinfo = pd.read_csv(os.path.join(gl.baseDir, 'participants.tsv'), sep='\t')
-
-        for day in np.arange(1, 5, 5):
-            for sn in pinfo.subNum.unique():
-                behav = calc_single_trial(
-                    day=day,
-                    sn=sn,
-                )
-
-                pass
-
-    else:
-        parser.print_help()
 
 if __name__ == '__main__':
+    start = time.time()
     main()
-
+    end = time.time()

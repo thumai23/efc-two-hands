@@ -22,6 +22,7 @@ def lowpass_fir(data, n_ord=None, cutoff=None, fsample=None, padlen=None, axis=-
     """
     numtaps = int(n_ord * fsample / cutoff)
     b = firwin(numtaps + 1, cutoff, fs=fsample, pass_zero='lowpass')
+
     filtered_data = filtfilt(b, 1, data, axis=axis, padlen=padlen)
 
     return filtered_data
@@ -117,6 +118,7 @@ def calc_single_trial_metrics(experiment=None, sn=None, day=None, blocks=None):
 
     pinfo = pd.read_csv(os.path.join(gl.baseDir, 'participants.tsv'), sep='\t')
     trained = pinfo[pinfo['subNum'] == sn].trained_chords.reset_index(drop=True)[0].split('.')
+    group = pinfo[pinfo['subNum'] == sn].group.reset_index(drop=True)[0]
 
     single_trial_metrics = {
         'subNum': [],
@@ -138,7 +140,7 @@ def calc_single_trial_metrics(experiment=None, sn=None, day=None, blocks=None):
         'RT': [],
         'ET': [],
         'MD': [],
-        # 'MD_c++': [],
+        'trained_hand': [],
         'chordID': [],
         'chord': []
 
@@ -153,18 +155,25 @@ def calc_single_trial_metrics(experiment=None, sn=None, day=None, blocks=None):
 
         for ntrial, mov_tmp in enumerate(mov):
 
-            print(f'Processing... subj{sn},  day {day}, block {bl}, trial {ntrial + 1}, hand {dat_tmp.iloc[ntrial].hand}, {len(mov)} trials found...')
+            print(
+                f'Processing... subj{sn},  day {day}, block {bl}, trial {ntrial + 1}, hand {dat_tmp.iloc[ntrial].hand}, {len(mov)} trials found...')
 
             force_tmp = mov_tmp[mov_tmp[:, 0] == gl.wait_exec][:, ch_idx]
 
+            # if len(force_tmp) > 0:
             # flip if left hand
             if dat_tmp.iloc[ntrial].hand == '1':
                 force_tmp = np.flip(force_tmp, axis=1)
 
             # add gain
             force_tmp = force_tmp * gl.fGain
+            force_filt = lowpass_fir(force_tmp, n_ord=4, cutoff=10, fsample=gl.fsample, padlen=len(force_tmp) - 1,
+                                     axis=0)
 
-            force_filt = lowpass_fir(force_tmp, n_ord=4, cutoff=10, fsample=gl.fsample, padlen=300, axis=0)
+            # else:
+                # force_tmp = np.zeros((100, 5)) * np.nan
+                # force_filt = np.zeros((100, 5)) * np.nan
+
             force_der1 = np.gradient(force_filt, 1 / gl.fsample, axis=0)
 
             force_der1_avg = np.abs(force_der1.mean(axis=0))
@@ -209,6 +218,7 @@ def calc_single_trial_metrics(experiment=None, sn=None, day=None, blocks=None):
             # single_trial_metrics['MD_c++'].append(dat_tmp.iloc[ntrial]['MD'])
             single_trial_metrics['BN'].append(dat_tmp.iloc[ntrial]['BN'])
             single_trial_metrics['TN'].append(dat_tmp.iloc[ntrial]['TN'])
+            single_trial_metrics['trained_hand'].append(int(group) == int(dat_tmp.iloc[ntrial]['hand']))
             single_trial_metrics['trialPoint'].append(dat_tmp.iloc[ntrial]['trialPoint'])
 
     single_trial_metrics = pd.DataFrame(single_trial_metrics)
@@ -216,19 +226,7 @@ def calc_single_trial_metrics(experiment=None, sn=None, day=None, blocks=None):
     return single_trial_metrics
 
 
-def main():
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument('what', nargs='?', default=None)
-    parser.add_argument('--experiment', type=str, default='efc_2hands')
-    # parser.add_argument('--session', type=str, default=None)
-    parser.add_argument('--sn', type=int, default=None)
-    parser.add_argument('--day', type=int, default=None)
-    parser.add_argument('--days', nargs='+', default=[1, 2, 3, 4, 5])
-    parser.add_argument('--blocks', type=int, default=[1, 2, 3, 4, 5, 6, 7, 8])
-
-    args = parser.parse_args()
-
+def main(args):
     if args.what == 'single_trial':
         for day in args.days:
             if day == 1:
@@ -241,8 +239,40 @@ def main():
         single_trial_metrics.to_csv(
             os.path.join(gl.baseDir, f'subj{args.sn}_single_trial.tsv'), sep='\t', index=False)
 
+    if args.what == 'single_trial_all':
+        for sn in args.snS:
+            args = argparse.Namespace(
+                what='single_trial',
+                experiment=args.experiment,
+                sn=sn,
+                blocks=args.blocks,
+                days=args.days,
+            )
+            main(args)
+
+    if args.what == 'merge_participants':
+        df = pd.DataFrame()
+        for sn in args.snS:
+            df_tmp = pd.read_csv(os.path.join(gl.baseDir, f'subj{sn}_single_trial.tsv'), sep='\t')
+            df = pd.concat([df, df_tmp])
+        df.to_csv(os.path.join(gl.baseDir, 'merged_single_trial.tsv'), sep='\t', index=False)
+
 
 if __name__ == '__main__':
     start = time.time()
-    main()
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument('what', nargs='?', default=None)
+    parser.add_argument('--experiment', type=str, default='efc_2hands')
+    # parser.add_argument('--session', type=str, default=None)
+    parser.add_argument('--sn', type=int, default=None)
+    parser.add_argument('--snS', nargs='+', type=int, default=[100, 101, 102, 103, 104, 105, 106, 107, 108, 109])
+    parser.add_argument('--day', type=int, default=None)
+    parser.add_argument('--days', nargs='+', default=[1, 2, 3, 4, 5])
+    parser.add_argument('--blocks', type=int, default=[1, 2, 3, 4, 5, 6, 7, 8])
+
+    args = parser.parse_args()
+    main(args)
     end = time.time()
+
+    print(f'Finished in {end - start:.2f} seconds')
